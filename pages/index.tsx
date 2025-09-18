@@ -22,6 +22,8 @@ interface SessionSummaryResult {
   summaries: PlayerSummary[];
 }
 
+const PDF_ERROR_MESSAGE = "Failed to generate PDF. Please try again.";
+
 export default function Home() {
   const [players, setPlayers] = useState<string[]>(["", ""]);
   const [audioFile, setAudioFile] = useState<File | null>(null);
@@ -29,6 +31,109 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SessionSummaryResult | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  const handleDownloadPdf = async () => {
+    if (!result) {
+      return;
+    }
+
+    try {
+      const { jsPDF } = await import("jspdf");
+
+      const doc = new jsPDF({ orientation: "p", unit: "mm", format: "a4" });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const margin = 14;
+      const maxWidth = pageWidth - margin * 2;
+      let cursorY = margin;
+      const lineHeight = 6;
+
+      const ensureSpace = (needed: number) => {
+        if (cursorY + needed > pageHeight - margin) {
+          doc.addPage();
+          cursorY = margin;
+        }
+      };
+
+      const addLines = (
+        lines: string[],
+        options: { bold?: boolean; heading?: boolean; fontSize?: number } = {}
+      ) => {
+        const nextFontSize = options.fontSize ?? (options.heading ? 16 : 12);
+        doc.setFontSize(nextFontSize);
+        doc.setFont("helvetica", options.bold ? "bold" : "normal");
+
+        for (const line of lines) {
+          ensureSpace(lineHeight);
+          doc.text(line, margin, cursorY);
+          cursorY += lineHeight;
+        }
+        ensureSpace(2);
+        cursorY += 2;
+      };
+
+      const addParagraph = (
+        text: string,
+        options?: { bold?: boolean; heading?: boolean; fontSize?: number }
+      ) => {
+        if (!text.trim()) {
+          return;
+        }
+        const lines = doc.splitTextToSize(text.trim(), maxWidth);
+        addLines(lines, options ?? {});
+      };
+
+      const addSectionHeading = (heading: string) => {
+        addParagraph(heading, { bold: true, heading: true });
+      };
+
+      const addBulletPoints = (points: string[]) => {
+        for (const point of points) {
+          if (!point.trim()) continue;
+          const bulletLines = doc.splitTextToSize(point.trim(), maxWidth - 6);
+          ensureSpace(lineHeight * bulletLines.length + 2);
+          doc.setFontSize(12);
+          doc.setFont("helvetica", "normal");
+          doc.text("•", margin, cursorY);
+          doc.text(bulletLines[0], margin + 4, cursorY);
+          cursorY += lineHeight;
+
+          for (const continuation of bulletLines.slice(1)) {
+            ensureSpace(lineHeight);
+            doc.text(continuation, margin + 7, cursorY);
+            cursorY += lineHeight;
+          }
+
+          cursorY += 2;
+        }
+      };
+
+      addParagraph("Party Chronicle", { bold: true, heading: true, fontSize: 18 });
+      addParagraph(`Generated ${new Date().toLocaleString()}`, { fontSize: 10 });
+
+      addSectionHeading("Dungeon Master's Overview");
+      addParagraph(result.dmSummary);
+
+      addSectionHeading("Player Summaries");
+      for (const summary of result.summaries) {
+        addParagraph(summary.name, { bold: true });
+        addBulletPoints(summary.points);
+      }
+
+      if (result.transcript.trim()) {
+        addSectionHeading("Transcript");
+        const transcriptLines = doc.splitTextToSize(result.transcript.trim(), maxWidth);
+        addLines(transcriptLines);
+      }
+
+      const sessionDate = new Date().toISOString().slice(0, 10);
+      doc.save(`session-summary-${sessionDate}.pdf`);
+      setError((previous) => (previous === PDF_ERROR_MESSAGE ? null : previous));
+    } catch (pdfError) {
+      console.error("Failed to generate PDF", pdfError);
+      setError(PDF_ERROR_MESSAGE);
+    }
+  };
 
   const handlePlayerChange = (index: number, value: string) => {
     setPlayers((prev) => prev.map((player, idx) => (idx === index ? value : player)));
@@ -300,11 +405,20 @@ export default function Home() {
 
             {result && (
               <section className="mt-10 space-y-6 rounded-2xl border border-amber-800/60 bg-[#22140f]/90 p-6">
-                <header>
-                  <h2 className="text-2xl font-semibold text-amber-100">Party Chronicle</h2>
-                  <p className="mt-2 text-sm text-amber-300/80">
-                    Each player&apos;s deeds, recorded for posterity.
-                  </p>
+                <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h2 className="text-2xl font-semibold text-amber-100">Party Chronicle</h2>
+                    <p className="mt-2 text-sm text-amber-300/80">
+                      Each player&apos;s deeds, recorded for posterity.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleDownloadPdf}
+                    className="inline-flex items-center justify-center rounded-full border border-amber-500/80 bg-[#2a1c14] px-5 py-2 text-xs font-semibold uppercase tracking-[0.25em] text-amber-200 transition hover:border-amber-400 hover:text-amber-50"
+                  >
+                    Download PDF
+                  </button>
                 </header>
 
                 <div className="space-y-4">
