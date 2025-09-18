@@ -120,9 +120,10 @@ Return a strict JSON object with the following shape (do not include any extra c
 
 Rules:
 - Include an entry for every player that was provided, even if they were not mentioned.
+- Do not include players who were not listed in the provided player names.
 - Each player's bullet points should cover notable events.
 - When an event in the transcript directly mentions a given player, give that event extra detail in that player's bullets.
-- Use between 2 and 5 concise bullets per player.
+- Use between 3 and 10 concise bullets per player.
 - If the transcript does not mention the player at all, provide at least one bullet describing their lack of involvement or presumed presence.
 - Do not fabricate events that are not supported by the transcript.`;
 };
@@ -180,9 +181,49 @@ const handler = async (
 
   try {
     ensureEnv();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unexpected error";
+    return res.status(500).json({ error: message });
+  }
 
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.status(200);
+
+  let responseEnded = false;
+  const writeLine = (payload: unknown) => {
+    if (responseEnded || res.writableEnded) {
+      return;
+    }
+    res.write(`${JSON.stringify(payload)}\n`);
+  };
+
+  const endResponse = () => {
+    if (!responseEnded && !res.writableEnded) {
+      responseEnded = true;
+      res.end();
+    }
+  };
+
+  const sendProgress = (message: string, meta: Record<string, unknown> = {}) => {
+    writeLine({ type: "progress", message, ...meta });
+  };
+
+  const sendError = (message: string) => {
+    writeLine({ type: "error", message });
+    endResponse();
+  };
+
+  const sendResult = (payload: SessionSummaryResponse) => {
+    writeLine({ type: "result", payload });
+    endResponse();
+  };
+
+  try {
     console.log("[session-summary] Incoming request");
 
+    sendProgress("Parsing upload");
     const { fields, files } = await parseMultipart(req);
 
     console.log("[session-summary] Parsed multipart payload", {
@@ -219,7 +260,8 @@ const handler = async (
     }
 
     if (playerNames.length === 0) {
-      return res.status(400).json({ error: "At least one player name is required" });
+      sendError("At least one player name is required");
+      return;
     }
 
     const cleanedPlayers = playerNames
@@ -227,7 +269,8 @@ const handler = async (
       .filter((player) => player.length > 0);
 
     if (cleanedPlayers.length === 0) {
-      return res.status(400).json({ error: "Player names cannot be empty" });
+      sendError("Player names cannot be empty");
+      return;
     }
 
     const audioField = (files.audio ?? files.file) as FormidableFile | FormidableFile[] | undefined;
@@ -237,7 +280,8 @@ const handler = async (
       : audioField;
 
     if (!audioFile || !audioFile.filepath) {
-      return res.status(400).json({ error: "Audio file is required" });
+      sendError("Audio file is required");
+      return;
     }
 
     console.log("[session-summary] Received audio file", {
@@ -247,6 +291,7 @@ const handler = async (
       tempPath: audioFile.filepath,
     });
 
+    sendProgress("Preparing audio for transcription");
     const readablePath = await ensureExtensionOnPath(audioFile);
 
     console.log("[session-summary] Prepared audio for transcription", { readablePath });
@@ -268,6 +313,7 @@ const handler = async (
         fileSize: stats.size,
         uploadFileName,
       });
+      sendProgress("Transcribing audio - this may take a while", { step: "transcription" });
       const transcription = await openai.audio.transcriptions.create({
         file: await toFile(fs.createReadStream(readablePath), uploadFileName),
         model: "whisper-1",
@@ -283,12 +329,17 @@ const handler = async (
       console.log("[session-summary] Transcription complete", {
         transcriptLength: transcriptText.length,
       });
+      sendProgress("Transcription complete", {
+        step: "transcription",
+        transcriptLength: transcriptText.length,
+      });
     } finally {
       await fsPromises.unlink(readablePath).catch(() => undefined);
     }
 
     if (!transcriptText) {
-      return res.status(500).json({ error: "Transcription failed" });
+      sendError("Transcription failed");
+      return;
     }
 
     const prompt = buildPrompt(cleanedPlayers, transcriptText);
@@ -296,6 +347,8 @@ const handler = async (
     console.log("[session-summary] Requesting player summaries", {
       playerCount: cleanedPlayers.length,
     });
+
+    sendProgress("Generating player summaries", { step: "summaries" });
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -315,7 +368,8 @@ const handler = async (
 
     const content = completion.choices[0]?.message?.content;
     if (!content) {
-      return res.status(500).json({ error: "No summary returned by model" });
+      sendError("No summary returned by model");
+      return;
     }
 
     const summaries = parseSummaries(content, cleanedPlayers);
@@ -328,12 +382,14 @@ const handler = async (
     console.log("[session-summary] Summaries generated", {
       summaryCount: summaries.length,
     });
-
-    return res.status(200).json(responsePayload);
+    sendProgress("Summaries ready", { step: "summaries", summaryCount: summaries.length });
+    sendResult(responsePayload);
   } catch (error) {
     console.error("Session summary API error", error);
     const message = error instanceof Error ? error.message : "Unexpected error";
-    return res.status(500).json({ error: message });
+    if (!responseEnded && !res.writableEnded) {
+      sendError(message);
+    }
   }
 };
 

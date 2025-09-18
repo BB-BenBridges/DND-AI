@@ -27,6 +27,7 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SessionSummaryResult | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const handlePlayerChange = (index: number, value: string) => {
     setPlayers((prev) => prev.map((player, idx) => (idx === index ? value : player)));
@@ -57,6 +58,7 @@ export default function Home() {
       setIsLoading(true);
       setError(null);
       setResult(null);
+      setStatusMessage("Uploading audio...");
 
       const formData = new FormData();
       formData.append("audio", audioFile);
@@ -67,18 +69,119 @@ export default function Home() {
         body: formData,
       });
 
-      const payload = await response.json();
+      if (!response.ok && !response.body) {
+        const payload = await response.json();
+        throw new Error(payload.error || "An unexpected error occurred.");
+      }
 
-      if (!response.ok) {
-        setError(payload.error || "An unexpected error occurred.");
+      const reader = response.body?.getReader();
+      if (!reader) {
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error || "An unexpected error occurred.");
+        }
+        setResult(payload as SessionSummaryResult);
+        setStatusMessage(null);
         return;
       }
 
-      setResult(payload as SessionSummaryResult);
+      const decoder = new TextDecoder();
+      let buffered = "";
+      let encounteredError: string | null = null;
+      let streamResult: SessionSummaryResult | null = null;
+
+      const processBuffer = async () => {
+        while (buffered.includes("\n")) {
+          const newlineIndex = buffered.indexOf("\n");
+          const line = buffered.slice(0, newlineIndex).trim();
+          buffered = buffered.slice(newlineIndex + 1);
+          if (!line) continue;
+
+          try {
+            const event = JSON.parse(line) as
+              | { type: "progress"; message?: string }
+              | { type: "result"; payload: SessionSummaryResult }
+              | { type: "error"; message?: string };
+
+            if (event.type === "progress" && event.message) {
+              setStatusMessage(event.message);
+            } else if (event.type === "result") {
+              streamResult = event.payload;
+              setResult(event.payload);
+              setStatusMessage(null);
+            } else if (event.type === "error") {
+              encounteredError = event.message ?? "Failed to process session.";
+              setError(encounteredError);
+              setStatusMessage(null);
+              await reader.cancel().catch(() => undefined);
+              return;
+            }
+          } catch (streamError) {
+            console.error("Failed to parse stream chunk", streamError, { line });
+          }
+        }
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          buffered += decoder.decode();
+          await processBuffer();
+          break;
+        }
+
+        buffered += decoder.decode(value, { stream: true });
+        await processBuffer();
+
+        if (encounteredError) {
+          break;
+        }
+      }
+
+      if (!streamResult) {
+        const leftover = buffered.trim();
+        if (leftover.length > 0) {
+          try {
+            const fallback = JSON.parse(leftover) as
+              | { error?: unknown }
+              | SessionSummaryResult
+              | undefined;
+
+            if (fallback && typeof fallback === "object") {
+              if ("error" in fallback && typeof fallback.error === "string") {
+                encounteredError = fallback.error;
+                setError(fallback.error);
+                setStatusMessage(null);
+              } else if (
+                "transcript" in fallback &&
+                "summaries" in fallback &&
+                Array.isArray((fallback as SessionSummaryResult).summaries)
+              ) {
+                streamResult = fallback as SessionSummaryResult;
+                setResult(streamResult);
+                setStatusMessage(null);
+              }
+            }
+          } catch (fallbackError) {
+            console.error("Failed to parse fallback response", fallbackError, {
+              leftover,
+            });
+          }
+        }
+      }
+
+      if (encounteredError) {
+        return;
+      }
+
+      if (!encounteredError && !streamResult) {
+        throw new Error("The server did not return a summary.");
+      }
     } catch (apiError) {
       setError(apiError instanceof Error ? apiError.message : "Failed to process session.");
     } finally {
       setIsLoading(false);
+      setStatusMessage(null);
     }
   };
 
@@ -110,11 +213,11 @@ export default function Home() {
                 <span className="text-sm font-semibold uppercase tracking-widest text-amber-300">
                   Session Audio
                 </span>
-                <div className="rounded-2xl border border-dashed border-amber-700/60 bg-[#21140f] px-4 py-6 text-center transition hover:border-amber-500 hover:bg-[#2d1c14]">
+                <div className="relative rounded-2xl border border-dashed border-amber-700/60 bg-[#21140f] px-4 py-6 text-center transition hover:border-amber-500 hover:bg-[#2d1c14]">
                   <input
                     type="file"
                     accept="audio/*"
-                    className="block w-full cursor-pointer text-sm text-amber-200"
+                    className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
                     onChange={(event) => {
                       const file = event.target.files?.[0];
                       setAudioFile(file ?? null);
@@ -171,6 +274,12 @@ export default function Home() {
               {error && (
                 <p className="rounded-2xl border border-rose-700/60 bg-rose-950/60 px-4 py-3 text-sm text-rose-200">
                   {error}
+                </p>
+              )}
+
+              {statusMessage && (
+                <p className="rounded-2xl border border-amber-700/60 bg-[#21140f] px-4 py-3 text-sm text-amber-200/90">
+                  {statusMessage}
                 </p>
               )}
 
