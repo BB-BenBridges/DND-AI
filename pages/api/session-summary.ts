@@ -13,6 +13,12 @@ interface PlayerSummary {
 
 interface SessionSummaryResponse {
   transcript: string;
+  dmSummary: string;
+  summaries: PlayerSummary[];
+}
+
+interface ParsedSummaryResult {
+  overallSummary: string;
   summaries: PlayerSummary[];
 }
 
@@ -113,12 +119,14 @@ ${transcript}
 
 Return a strict JSON object with the following shape (do not include any extra commentary or markdown):
 {
+  "dmSummary": "Short overall recap tailored to the Dungeon Master",
   "players": [
     { "name": "Player name", "points": ["bullet point", "bullet point"] }
   ]
 }
 
 Rules:
+- The \"dmSummary\" must be between 3 and 6 sentences that cover table-wide developments, unresolved hooks, and suggested follow-ups for the next session.
 - Include an entry for every player that was provided, even if they were not mentioned.
 - Do not include players who were not listed in the provided player names.
 - Each player's bullet points should cover notable events.
@@ -128,9 +136,12 @@ Rules:
 - Do not fabricate events that are not supported by the transcript.`;
 };
 
-const parseSummaries = (raw: string, players: string[]): PlayerSummary[] => {
+const parseSummaries = (raw: string, players: string[]): ParsedSummaryResult => {
   try {
-    const parsed = JSON.parse(raw) as { players?: { name?: string; points?: unknown }[] };
+    const parsed = JSON.parse(raw) as {
+      dmSummary?: unknown;
+      players?: { name?: string; points?: unknown }[];
+    };
     if (!parsed.players || !Array.isArray(parsed.players)) {
       throw new Error("Invalid response shape");
     }
@@ -160,13 +171,24 @@ const parseSummaries = (raw: string, players: string[]): PlayerSummary[] => {
       }
     }
 
-    return summaries;
+    const overallSummary =
+      typeof parsed.dmSummary === "string" && parsed.dmSummary.trim().length > 0
+        ? parsed.dmSummary.trim()
+        : "The AI response did not include an overall summary for the Dungeon Master.";
+
+    return {
+      overallSummary,
+      summaries,
+    };
   } catch (error) {
     console.error("Failed to parse model response", error);
-    return players.map((name) => ({
-      name,
-      points: ["The AI response could not be parsed."],
-    }));
+    return {
+      overallSummary: "The AI response could not be parsed.",
+      summaries: players.map((name) => ({
+        name,
+        points: ["The AI response could not be parsed."],
+      })),
+    };
   }
 };
 
@@ -372,17 +394,21 @@ const handler = async (
       return;
     }
 
-    const summaries = parseSummaries(content, cleanedPlayers);
+    const { overallSummary, summaries } = parseSummaries(content, cleanedPlayers);
 
     const responsePayload: SessionSummaryResponse = {
       transcript: transcriptText,
+      dmSummary: overallSummary,
       summaries,
     };
 
     console.log("[session-summary] Summaries generated", {
       summaryCount: summaries.length,
     });
-    sendProgress("Summaries ready", { step: "summaries", summaryCount: summaries.length });
+    sendProgress("Summaries ready", {
+      step: "summaries",
+      summaryCount: summaries.length,
+    });
     sendResult(responsePayload);
   } catch (error) {
     console.error("Session summary API error", error);

@@ -18,6 +18,7 @@ interface PlayerSummary {
 
 interface SessionSummaryResult {
   transcript: string;
+  dmSummary: string;
   summaries: PlayerSummary[];
 }
 
@@ -307,6 +308,15 @@ export default function Home() {
                 </header>
 
                 <div className="space-y-4">
+                  {result.dmSummary && (
+                    <article className="rounded-2xl border border-amber-900/50 bg-[#1c120c] px-5 py-4">
+                      <h3 className="text-lg font-semibold text-amber-200">Dungeon Master&apos;s Overview</h3>
+                      <p className="mt-3 whitespace-pre-wrap text-sm text-amber-100/90">
+                        {result.dmSummary}
+                      </p>
+                    </article>
+                  )}
+
                   {result.summaries.map((summary) => (
                     <article
                       key={summary.name}
